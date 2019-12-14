@@ -6,6 +6,7 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -18,10 +19,158 @@
 
 using namespace std;
 
+void extractDetectorKeypoints(string detectorType, vector<cv::KeyPoint> &keypoints, cv::Mat &imgGray)
+{
+    if (detectorType.compare("SHITOMASI") == 0)
+    {
+        detKeypointsShiTomasi(keypoints, imgGray, false);
+    }
+    else
+    {
+        detKeypointsModern(keypoints, imgGray, detectorType, false);
+    }
+
+    // only keep keypoints on the preceding vehicle
+    cv::Rect vehicleRect(535, 180, 180, 150);
+    vector<cv::KeyPoint> restrictedKeypoints;
+    for (int i = 0; i < keypoints.size(); i++)
+    {
+        if (vehicleRect.contains(keypoints[i].pt))
+        {
+            restrictedKeypoints.push_back(keypoints[i]);
+        }
+    }
+    keypoints = restrictedKeypoints;
+    // push keypoints and descriptor for current frame to end of data buffer
+    bool bVis = false;
+    if (bVis)
+    {
+        cv::Mat visImage = imgGray.clone();
+        cv::drawKeypoints(imgGray, keypoints, visImage, cv::Scalar::all(-1), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+        string windowName = detectorType + " Detector Results";
+        cv::namedWindow(windowName, 6);
+        imshow(windowName, visImage);
+        cv::waitKey(0);
+    }
+}
+
+void evaluate()
+{
+    /* INIT VARIABLES AND DATA STRUCTURES */
+
+    // data location
+    string dataPath = "../";
+
+    // camera
+    string imgBasePath = dataPath + "images/";
+    string imgPrefix = "KITTI/2011_09_26/image_00/data/000000"; // left camera, color
+    string imgFileType = ".png";
+    int imgStartIndex = 0; // first file index to load (assumes Lidar and camera names have identical naming convention)
+    int imgEndIndex = 1;   // last file index to load
+    int imgFillWidth = 4;  // no. of digits which make up the file index (e.g. img-0001.png)
+
+    // misc
+    int dataBufferSize = 2;       // no. of images which are held in memory (ring buffer) at the same time
+    //vector<DataFrame> dataBuffer; // list of data frames which are held in memory at the same time
+    bool bVis = false;            // visualize results
+
+    std::map<string, std::map<int, int>> detectorImgCount;
+    /* MAIN LOOP OVER ALL IMAGES */
+    vector<string> keypoint_detectors{"SHITOMASI", "HARRIS", "FAST", "BRISK", "ORB", "AKAZE", "SIFT"};
+    //vector<string> keypoint_detectors{"SIFT"};
+    vector<string> keypoint_descreptors{"BRIEF"}; //BRIEF, ORB, FREAK, AKAZE, SIFT
+    //vector<string> keypoint_descreptors{ "FREAK"}; //BRIEF, ORB, FREAK, AKAZE, SIFT
+
+    for (int desInd = 0; desInd < keypoint_descreptors.size(); ++desInd)
+    {
+        for (int detectorInd = 0; detectorInd < keypoint_detectors.size(); ++detectorInd)
+        {
+            vector<DataFrame> dataBuffer;
+            for (size_t imgIndex = 0; imgIndex <= imgEndIndex - imgStartIndex; imgIndex++)
+            {
+                /* LOAD IMAGE INTO BUFFER */
+
+                // assemble filenames for current index
+                ostringstream imgNumber;
+                imgNumber << setfill('0') << setw(imgFillWidth) << imgStartIndex + imgIndex;
+                string imgFullFilename = imgBasePath + imgPrefix + imgNumber.str() + imgFileType;
+
+                // load image from file and convert to grayscale
+                cv::Mat img, imgGray;
+                img = cv::imread(imgFullFilename);
+                cv::cvtColor(img, imgGray, cv::COLOR_BGR2GRAY);
+
+                //// STUDENT ASSIGNMENT
+                //// TASK MP.1 -> replace the following code with ring buffer of size dataBufferSize
+
+                // push image into data frame buffer
+                DataFrame frame;
+                frame.cameraImg = imgGray;
+                dataBuffer.push_back(frame);
+
+                if (dataBuffer.size() > dataBufferSize)
+                {
+                    dataBuffer.erase(dataBuffer.begin());
+                }
+
+                /* DETECT IMAGE KEYPOINTS */
+
+                // extract 2D keypoints from current image
+                vector<cv::KeyPoint> keypoints; // create empty feature list for current image
+
+                extractDetectorKeypoints(keypoint_detectors[detectorInd], keypoints, imgGray);
+                (dataBuffer.end() - 1)->keypoints = keypoints;
+                detectorImgCount[keypoint_detectors[detectorInd]][imgIndex] = keypoints.size();
+                //std::cout << imgIndex << "," << keypoint_detectors[i] << "," << keypoints.size() << std::endl;
+
+                cv::Mat descriptors;
+                //string descriptorType = keypoint_descreptors[desInd]; // BRIEF, ORB, FREAK, AKAZE, SIFT
+
+                descKeypoints((dataBuffer.end() - 1)->keypoints, (dataBuffer.end() - 1)->cameraImg, descriptors, keypoint_descreptors[desInd]);
+
+                // push descriptors for current frame to end of data buffer
+                (dataBuffer.end() - 1)->descriptors = descriptors;
+
+                if (dataBuffer.size() > 1) // wait until at least two images have been processed
+                {
+                    /* MATCH KEYPOINT DESCRIPTORS */
+
+                    vector<cv::DMatch> matches;
+                    string matcherType = "MAT_BF";  // MAT_BF, MAT_FLANN
+                    string descriptorType = "DES_HOG"; // DES_BINARY, DES_HOG
+                    string selectorType = "SEL_KNN";   // SEL_NN, SEL_KNN
+
+                    matchDescriptors((dataBuffer.end() - 2)->keypoints, (dataBuffer.end() - 1)->keypoints,
+                                     (dataBuffer.end() - 2)->descriptors, (dataBuffer.end() - 1)->descriptors,
+                                     matches, descriptorType, matcherType, selectorType);
+
+                    // store matches in current data frame
+                    (dataBuffer.end() - 1)->kptMatches = matches;
+                    std::cout << "Detector:[" << keypoint_detectors[detectorInd] << "]" 
+                    << "\tDecriptor:[" << keypoint_descreptors[desInd] << "]"
+                    << "\tMatches:[" << matches.size() << "]" << std::endl;
+                } 
+            }
+        }
+    }
+
+    // for (auto it = detectorImgCount.begin(); it != detectorImgCount.end(); ++it)
+    // {
+    //     std::cout << it->first;
+    //     for (auto itr = it->second.begin(); itr != it->second.end(); ++itr)
+    //     {
+    //         std::cout << "," << itr->second;
+    //     }
+    //     std::cout << std::endl;
+    // }
+}
+
 /* MAIN PROGRAM */
 int main(int argc, const char *argv[])
 {
 
+    // evaluate();
+    // return 0;
     /* INIT VARIABLES AND DATA STRUCTURES */
 
     // data location
@@ -64,7 +213,8 @@ int main(int argc, const char *argv[])
         frame.cameraImg = imgGray;
         dataBuffer.push_back(frame);
 
-        if (dataBuffer.size() > dataBufferSize) {
+        if (dataBuffer.size() > dataBufferSize)
+        {
             dataBuffer.erase(dataBuffer.begin());
         }
 
@@ -75,7 +225,7 @@ int main(int argc, const char *argv[])
 
         // extract 2D keypoints from current image
         vector<cv::KeyPoint> keypoints; // create empty feature list for current image
-        string detectorType = "FAST";
+        string detectorType = "SHITOMASI";
 
         //// STUDENT ASSIGNMENT
         //// TASK MP.2 -> add the following keypoint detectors in file matching2D.cpp and enable string-based selection based on detectorType
@@ -113,7 +263,7 @@ int main(int argc, const char *argv[])
         //// EOF STUDENT ASSIGNMENT
 
         // optional : limit number of keypoints (helpful for debugging and learning)
-        bool bLimitKpts = true;
+        bool bLimitKpts = false;
         if (bLimitKpts)
         {
             int maxKeypoints = 50;
@@ -137,7 +287,7 @@ int main(int argc, const char *argv[])
         //// -> BRIEF, ORB, FREAK, AKAZE, SIFT
 
         cv::Mat descriptors;
-        string descriptorType = "FREAK"; // BRIEF, ORB, FREAK, AKAZE, SIFT
+        string descriptorType = "BRISK"; // BRIEF, ORB, FREAK, AKAZE, SIFT
         descKeypoints((dataBuffer.end() - 1)->keypoints, (dataBuffer.end() - 1)->cameraImg, descriptors, descriptorType);
         //// EOF STUDENT ASSIGNMENT
 
@@ -152,9 +302,9 @@ int main(int argc, const char *argv[])
             /* MATCH KEYPOINT DESCRIPTORS */
 
             vector<cv::DMatch> matches;
-            string matcherType = "MAT_BF";        // MAT_BF, MAT_FLANN
-            string descriptorType = "DES_BINARY"; // DES_BINARY, DES_HOG
-            string selectorType = "SEL_NN";       // SEL_NN, SEL_KNN
+            string matcherType = "MAT_FLANN";  // MAT_BF, MAT_FLANN
+            string descriptorType = "DES_HOG"; // DES_BINARY, DES_HOG
+            string selectorType = "SEL_KNN";   // SEL_NN, SEL_KNN
 
             //// STUDENT ASSIGNMENT
             //// TASK MP.5 -> add FLANN matching in file matching2D.cpp
