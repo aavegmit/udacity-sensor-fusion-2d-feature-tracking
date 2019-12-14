@@ -414,7 +414,7 @@ BRISK Detector Results
 ORB Detector Results
 
 
-![alt_text](images/orb_detector_Results.png "image_tooltip")
+![alt_text](images/ORB_Detector_Results.png "image_tooltip")
 
 
 
